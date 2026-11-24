@@ -6,9 +6,10 @@
 // and only rides a coin once real buy flow has confirmed itself — net SOL coming
 // in over the last few dozen slots, several distinct buyers, the price pressing
 // at its short-window high — and then it starts small, adds only while the price
-// and the flow keep confirming, and gets out on a stop, a trailing peak, fading
-// flow or a hard time limit. Small probe round trips on liquid curves keep the
-// run over the competition's 20-coin round-trip bar without risking real size.
+// and the flow keep confirming, and banks a +15% take profit, a -8% stop, a
+// trailing peak, fading flow or a hard time limit, whichever comes first. Small
+// probe round trips on liquid curves keep the run over the competition's
+// 20-coin round-trip bar without risking real size.
 //
 // The bot is deterministic: it reads nothing but the hello, batch and fills the
 // harness sends — no clock, no environment, no randomness — so the two grading
@@ -30,39 +31,50 @@ const SOL = 1e9;
 const CURVE_FEE = 0.0125; // 95 bps protocol + 30 bps creator, the fallback pair in hello.fees
 
 // ---- entry signal -----------------------------------------------------------
-const FLOW_WINDOW = 45; // slots of tape the entry signal reads (~18 s)
-const MIN_AGE_SLOTS = 300; // a curve must be at least this old before a first buy
+// The bar is high on purpose: a round trip pays ~2.5% in curve fees plus two
+// transaction fees, and a confirmed pump is usually nearer its top than its
+// start, so only the strongest, broadest flow is worth riding at all.
+const FLOW_WINDOW = 60; // slots of tape the entry signal reads (~24 s)
+const MIN_AGE_SLOTS = 600; // a curve must be at least this old before a first buy
 const MIN_RESERVE_SOL = 3; // real SOL reserve band at entry: below is dust,
 const MAX_RESERVE_SOL = 70; // above is nearly complete (migration dumps follow)
-const MIN_NET_INFLOW = 1.5; // net SOL (buys - sells) over the flow window
-const MIN_BUY_TRADES = 6; // buy trades in the window
-const MIN_DISTINCT_BUYERS = 5; // distinct buying wallets in the window
-const MAX_SELL_SHARE = 0.45; // sells may be at most this share of window volume
-const MIN_PRICE_UP = 0.04; // price vs window start: at least +4% ...
-const MAX_PRICE_UP = 0.9; // ... but no more than +90% (do not chase a vertical)
+const MIN_NET_INFLOW = 3.0; // net SOL (buys - sells) over the flow window
+const MIN_BUY_TRADES = 8; // buy trades in the window
+const MIN_DISTINCT_BUYERS = 8; // distinct buying wallets in the window
+const MAX_SELL_SHARE = 0.4; // sells may be at most this share of window volume
+const MIN_PRICE_UP = 0.08; // price vs window start: at least +8% ...
+const MAX_PRICE_UP = 0.6; // ... but no more than +60% (do not chase a vertical)
 const NEAR_HIGH = 0.97; // price at least this share of the window high
 const MAX_TOP_BUYER = 0.5; // one wallet may be at most half the window's buy SOL
 
 // ---- sizing -----------------------------------------------------------------
-const FIRST_BUY_SOL = 0.25; // starter order; the position earns its size
-const ADD_BUY_SOL = 0.25; // each add, while strength confirms
-const MAX_STAKE_SOL = 0.75; // most SOL of cost in one coin
-const MAX_EXPOSURE_SOL = 4.5; // most SOL of cost across all positions at once
+// Small on purpose: on a cold window the bot should bleed slowly, and on a hot
+// one the same signals repeat often enough for size to compound through
+// turnover rather than through any single coin.
+const FIRST_BUY_SOL = 0.12; // starter order; the position earns its size
+const ADD_BUY_SOL = 0.08; // each add, while strength confirms
+const MAX_STAKE_SOL = 0.28; // most SOL of cost in one coin
+const MAX_EXPOSURE_SOL = 2.2; // most SOL of cost across all positions at once
 const MIN_BUY_SOL = 0.02; // smallest main buy worth its fees
-const ADD_STEP = 0.03; // an add needs the price 3% above the last buy's price
+const ADD_STEP = 0.05; // an add needs the price 5% above the last buy's price
 const ADD_MIN_FLOW = 0.5; // ... and still-positive net inflow over the window
 const BUY_SLIPPAGE_BPS = 2500; // momentum moves inside the latency; leave room
 const SELL_SLIPPAGE_BPS = 10_000; // exits are market: getting out is the point
 
 // ---- exits ------------------------------------------------------------------
-const STOP_LOSS = 0.18; // sell all when close value falls to cost * (1 - this)
-const TRAIL_ARM = 0.3; // trailing stop arms once value reached cost * 1.3
-const TRAIL_DROP = 0.25; // ... and fires when value falls to peak * (1 - this)
+// Fast and asymmetric: bank +15% the moment it is offered, cut at -8%, and let
+// a trailing stop harvest anything that overshoots between batches. With fees
+// already netted out of the close value, that pair needs only a modest hit
+// rate to pay for itself; slow, hopeful holds are what this market punishes.
+const TAKE_PROFIT = 0.15; // sell all when close value reaches cost * 1.15
+const STOP_LOSS = 0.08; // sell all when close value falls to cost * (1 - this)
+const TRAIL_ARM = 0.1; // trailing stop arms once value reached cost * 1.1
+const TRAIL_DROP = 0.1; // ... and fires when value falls to peak * (1 - this)
 const FADE_WINDOW = 20; // slots of tape the fade exit reads
-const FADE_NET = -1.0; // sell when net flow over the fade window is under this
+const FADE_NET = -0.6; // sell when net flow over the fade window is under this
 const BIG_SELL_SOL = 3; // one recorded sell this big in a batch: leave
-const MAX_HOLD_SLOTS = 2400; // hard time limit per position (~16 minutes)
-const HOLD_IF_UP = 0.25; // the time limit is waived while up at least this much
+const MAX_HOLD_SLOTS = 900; // hard time limit per position (~6 minutes)
+const HOLD_IF_UP = 0.1; // the time limit is waived while up at least this much
 const COOLDOWN_SLOTS = 200; // wait after an exit before re-entering a curve
 const MAX_ENTRIES = 2; // most entries per curve over the whole run
 
@@ -71,7 +83,7 @@ const MAX_ENTRIES = 2; // most entries per curve over the whole run
 // Probes are tiny round trips on liquid curves that exist only to clear it.
 const PROBE_BUY_SOL = 0.012; // just over the 0.01 SOL round-trip minimum
 const PROBE_TARGET_COINS = 22; // aim a little past the bar
-const PROBE_EVERY_SLOTS = 350; // at most one new probe per this many slots
+const PROBE_EVERY_SLOTS = 500; // at most one new probe per this many slots
 const PROBE_MIN_RESERVE = 5; // probe only curves with at least this much real SOL
 const PROBE_MAX_OPEN = 3; // probes only while at most this many positions are open
 
@@ -256,6 +268,7 @@ await runBot({
       const cost = Number(pos.cost_lamports) / SOL;
       if (value > h.peakValue) h.peakValue = value;
       let exit = h.exiting;
+      if (!exit && value >= cost * (1 + TAKE_PROFIT)) exit = true;
       if (!exit && value <= cost * (1 - STOP_LOSS)) exit = true;
       if (!exit && h.peakValue >= cost * (1 + TRAIL_ARM) && value <= h.peakValue * (1 - TRAIL_DROP)) exit = true;
       if (!exit && netFlow(tapeOf(mint), now, FADE_WINDOW) < FADE_NET) exit = true;
@@ -308,7 +321,7 @@ await runBot({
         if (netFlow(t, now, FLOW_WINDOW) < ADD_MIN_FLOW) continue;
         const pos = state.positions.get(mint);
         if (pos === undefined) continue;
-        if (closeValue(state, mint, pos.token_amount) < (Number(pos.cost_lamports) / SOL) * 0.98) continue;
+        if (closeValue(state, mint, pos.token_amount) < (Number(pos.cost_lamports) / SOL) * 1.02) continue;
         want = Math.min(ADD_BUY_SOL, MAX_STAKE_SOL - h.invested);
       }
       const capSol = Number(state.maxBuyLamports(mint)) / SOL;
