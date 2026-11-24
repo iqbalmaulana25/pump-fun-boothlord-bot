@@ -6,7 +6,7 @@
 // and only rides a coin once real buy flow has confirmed itself — net SOL coming
 // in over the last few dozen slots, several distinct buyers, the price pressing
 // at its short-window high — and then it starts small, adds only while the price
-// and the flow keep confirming, and banks a +15% take profit, a -8% stop, a
+// and the flow keep confirming, and banks a +10% take profit, a -6% stop, a
 // trailing peak, fading flow or a hard time limit, whichever comes first. Small
 // probe round trips on liquid curves keep the run over the competition's
 // 20-coin round-trip bar without risking real size.
@@ -45,7 +45,8 @@ const MAX_SELL_SHARE = 0.4; // sells may be at most this share of window volume
 const MIN_PRICE_UP = 0.08; // price vs window start: at least +8% ...
 const MAX_PRICE_UP = 0.6; // ... but no more than +60% (do not chase a vertical)
 const NEAR_HIGH = 0.97; // price at least this share of the window high
-const MAX_TOP_BUYER = 0.5; // one wallet may be at most half the window's buy SOL
+const MAX_TOP_BUYER = 0.4; // one wallet may be at most 40% of the window's buy SOL
+const MIN_ACCEL = 1.2; // newer half's net inflow must beat the older half's by this
 
 // ---- sizing -----------------------------------------------------------------
 // Small on purpose: on a cold window the bot should bleed slowly, and on a hot
@@ -62,18 +63,18 @@ const BUY_SLIPPAGE_BPS = 2500; // momentum moves inside the latency; leave room
 const SELL_SLIPPAGE_BPS = 10_000; // exits are market: getting out is the point
 
 // ---- exits ------------------------------------------------------------------
-// Fast and asymmetric: bank +15% the moment it is offered, cut at -8%, and let
+// Fast and asymmetric: bank +10% the moment it is offered, cut at -6%, and let
 // a trailing stop harvest anything that overshoots between batches. With fees
 // already netted out of the close value, that pair needs only a modest hit
 // rate to pay for itself; slow, hopeful holds are what this market punishes.
-const TAKE_PROFIT = 0.15; // sell all when close value reaches cost * 1.15
-const STOP_LOSS = 0.08; // sell all when close value falls to cost * (1 - this)
-const TRAIL_ARM = 0.1; // trailing stop arms once value reached cost * 1.1
-const TRAIL_DROP = 0.1; // ... and fires when value falls to peak * (1 - this)
+const TAKE_PROFIT = 0.1; // sell all when close value reaches cost * 1.10
+const STOP_LOSS = 0.06; // sell all when close value falls to cost * (1 - this)
+const TRAIL_ARM = 0.06; // trailing stop arms once value reached cost * 1.06
+const TRAIL_DROP = 0.06; // ... and fires when value falls to peak * (1 - this)
 const FADE_WINDOW = 20; // slots of tape the fade exit reads
 const FADE_NET = -0.6; // sell when net flow over the fade window is under this
 const BIG_SELL_SOL = 3; // one recorded sell this big in a batch: leave
-const MAX_HOLD_SLOTS = 900; // hard time limit per position (~6 minutes)
+const MAX_HOLD_SLOTS = 600; // hard time limit per position (~4 minutes)
 const HOLD_IF_UP = 0.1; // the time limit is waived while up at least this much
 const COOLDOWN_SLOTS = 200; // wait after an exit before re-entering a curve
 const MAX_ENTRIES = 2; // most entries per curve over the whole run
@@ -161,9 +162,12 @@ const entryOk = (t: Tape, now: number, reserveSol: number): boolean => {
   if (reserveSol < MIN_RESERVE_SOL || reserveSol > MAX_RESERVE_SOL) return false;
   if (t.created === null || now - t.created < MIN_AGE_SLOTS) return false;
   const from = now - FLOW_WINDOW;
+  const mid = now - FLOW_WINDOW / 2;
   let buySol = 0;
   let sellSol = 0;
   let buyTrades = 0;
+  let netOld = 0; // net inflow over the older half of the window
+  let netNew = 0; // net inflow over the newer half
   let startPrice = -1;
   let high = 0;
   let last = 0;
@@ -174,6 +178,9 @@ const entryOk = (t: Tape, now: number, reserveSol: number): boolean => {
       continue;
     }
     if (startPrice < 0) startPrice = tr.price;
+    const signed = tr.buy ? tr.sol : -tr.sol;
+    if (tr.slot <= mid) netOld += signed;
+    else netNew += signed;
     if (tr.buy) {
       buySol += tr.sol;
       buyTrades++;
@@ -186,6 +193,9 @@ const entryOk = (t: Tape, now: number, reserveSol: number): boolean => {
   }
   if (buyTrades < MIN_BUY_TRADES || buyers.size < MIN_DISTINCT_BUYERS) return false;
   if (buySol - sellSol < MIN_NET_INFLOW) return false;
+  // The flow must still be building, not exhausting: a pump whose second half
+  // is quieter than its first is a top, not a launchpad.
+  if (netNew < 1.5 || netNew < MIN_ACCEL * Math.max(netOld, 0)) return false;
   if (buySol + sellSol <= 0 || sellSol / (buySol + sellSol) > MAX_SELL_SHARE) return false;
   if (startPrice <= 0 || last <= 0 || high <= 0) return false;
   const up = last / startPrice - 1;
